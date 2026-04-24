@@ -22,11 +22,6 @@ const doc = new GoogleSpreadsheet(
   process.env.SPREADSHEET_ID,
   serviceAccountAuth,
 );
-const serviceAccountAuth = new JWT({
-  email: creds.client_email,
-  key: creds.private_key,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
 
 const doc = new GoogleSpreadsheet(
   process.env.SPREADSHEET_ID,
