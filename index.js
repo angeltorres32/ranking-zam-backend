@@ -8,7 +8,20 @@ const app = express();
 app.use(cors());
 
 // Cargar credenciales
-const creds = require("./key.json");
+const serviceAccountAuth = new JWT({
+  // Jalamos los datos directamente de las variables de Render
+  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  // Este replace es clave para que Render lea bien los saltos de línea de la llave
+  key: process.env.GOOGLE_PRIVATE_KEY
+    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n")
+    : undefined,
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+});
+
+const doc = new GoogleSpreadsheet(
+  process.env.SPREADSHEET_ID,
+  serviceAccountAuth,
+);
 const serviceAccountAuth = new JWT({
   email: creds.client_email,
   key: creds.private_key,
