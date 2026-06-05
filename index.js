@@ -2,13 +2,13 @@ const express = require("express");
 const { GoogleSpreadsheet } = require("google-spreadsheet");
 const { JWT } = require("google-auth-library");
 const cors = require("cors");
+const path = require("path");
 require("dotenv").config();
 
 const app = express();
-// IMPORTANTE: Permitimos CORS para que Vercel pueda leer los datos
 app.use(cors());
 
-// 1. Catálogo Maestro de Colaboradores (Para asegurar que aparezcan los 17 con 0 si no han vendido)
+// 1. Catálogo Maestro de Colaboradores
 const colaboradoresMaster = [
   { id: "104CGP", nombre: "Cristina Garcia Pineda" },
   { id: "113MCM", nombre: "Marisa Cortes Merino" },
@@ -29,14 +29,34 @@ const colaboradoresMaster = [
   { id: "116MAJZ", nombre: "Maria de los Angeles Jimenez Zaragoza" },
 ];
 
-// 2. CONFIGURACIÓN DE AUTENTICACIÓN GOOGLE (Vía Variables de Render)
-const serviceAccountAuth = new JWT({
-  email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  key: process.env.GOOGLE_PRIVATE_KEY
-    ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n")
-    : undefined,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
-});
+// 2. CONFIGURACIÓN DE AUTENTICACIÓN GOOGLE
+// Modificado para que en local use directamente tu archivo key.json
+let serviceAccountAuth;
+
+try {
+  // Intentamos cargar el archivo key.json que se ve en tu carpeta backend
+  const keyJsonPath = path.join(__dirname, "key.json");
+  const creds = require(keyJsonPath);
+
+  serviceAccountAuth = new JWT({
+    email: creds.client_email,
+    key: creds.private_key,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  console.log("🔒 Autenticación configurada usando key.json local");
+} catch (e) {
+  // Si no existe key.json (como en producción en Render), usa el .env
+  serviceAccountAuth = new JWT({
+    email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    key: process.env.GOOGLE_PRIVATE_KEY
+      ? process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n")
+      : undefined,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+  console.log(
+    "☁️ Autenticación configurada usando variables de entorno (.env)",
+  );
+}
 
 // 3. CONEXIÓN AL DOCUMENTO
 const doc = new GoogleSpreadsheet(
@@ -44,60 +64,65 @@ const doc = new GoogleSpreadsheet(
   serviceAccountAuth,
 );
 
-// 4. RUTA PARA OBTENER EL RANKING PROCESADO
+// 4. RUTA PARA OBTENER EL RANKING PROCESADO (CON FILTRO MENSUAL)
 app.get("/ranking", async (req, res) => {
   try {
     await doc.loadInfo();
-    const sheet = doc.sheetsByIndex[0]; // Asegúrate de que sea la pestaña correcta (la 0)
+    const sheet = doc.sheetsByIndex[0];
     const rows = await sheet.getRows();
 
-    // --- AQUÍ ESTÁ LA MAGIA DE LA PROGRAMACIÓN (EL PROCESAMIENTO) ---
-    // Usaremos un objeto para ir acumulando las ventas
     const ventasPorAgente = {};
 
+    // Obtener mes y año actual
+    const ahora = new Date();
+    const mesActual = ahora.getMonth();
+    const anioActual = ahora.getFullYear();
+
     rows.forEach((row) => {
-      // Obtenemos el ID de la columna larga y lo normalizamos a mayúsculas
+      const fechaString = row.get("Marca temporal");
+      if (!fechaString) return;
+
+      const fechaRegistro = new Date(fechaString);
+
+      // --- FILTRO MENSUAL ---
+      if (
+        fechaRegistro.getMonth() !== mesActual ||
+        fechaRegistro.getFullYear() !== anioActual
+      ) {
+        return;
+      }
+
       const rawId = row.get("Ingresa tu número de agente");
-      if (!rawId) return; // Saltamos filas vacías
+      if (!rawId) return;
 
       const agenteId = rawId.toUpperCase().trim();
-
-      // Obtenemos el valor de la columna de retorno ("Si" o "No")
       const retornoStatus = (row.get("¿Regreso el cliente?") || "").trim();
 
-      // Si es la primera vez que vemos a este agente, lo inicializamos en 0
       if (!ventasPorAgente[agenteId]) {
         ventasPorAgente[agenteId] = { boletos: 0, retornos: 0 };
       }
 
-      // Conteo de Boletos (Cada fila es una venta, o sea, un boleto)
       ventasPorAgente[agenteId].boletos += 1;
 
-      // Conteo de Retornos (Solo sumamos 1 si la columna dice "Si")
       if (retornoStatus.toLowerCase() === "si") {
         ventasPorAgente[agenteId].retornos += 1;
       }
     });
 
-    // --- CRUCE CON LA LISTA MAESTRA (MERGE) ---
-    // Esto asegura que salgan los 17 colaboradores, tengan ventas o no
+    // --- CRUCE CON LA LISTA MAESTRA ---
     const rankingFinal = colaboradoresMaster.map((colab) => {
-      // Buscamos si el colaborador máster tiene ventas registradas en el Excel
       const statsEnExcel = ventasPorAgente[colab.id.toUpperCase()];
 
       return {
         id: colab.id,
         nombreReal: colab.nombre,
-        // Si no tiene ventas, le ponemos 0
         boletos: statsEnExcel ? statsEnExcel.boletos : 0,
         retornos: statsEnExcel ? statsEnExcel.retornos : 0,
       };
     });
 
-    // --- ORDENAMIENTO (De mayor a menor retornos) ---
     rankingFinal.sort((a, b) => b.retornos - a.retornos);
 
-    // Enviamos el resultado procesado al Frontend
     res.json(rankingFinal);
   } catch (error) {
     console.error("Error al procesar el ranking de Ana María:", error);
@@ -108,7 +133,5 @@ app.get("/ranking", async (req, res) => {
 // 5. INICIO DEL SERVIDOR
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(
-    `Servidor de Zapaterías Ana María procesando datos en puerto ${PORT}`,
-  );
+  console.log(`Servidor de Zapaterías Ana María corriendo en puerto ${PORT}`);
 });
