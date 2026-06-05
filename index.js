@@ -6,9 +6,10 @@ const path = require("path");
 require("dotenv").config();
 
 const app = express();
+// Permitimos CORS para que el frontend local y de producción puedan consultar la API
 app.use(cors());
 
-// 1. Catálogo Maestro de Colaboradores
+// 1. Catálogo Maestro de Colaboradores (Los 17 del CEDIS)
 const colaboradoresMaster = [
   { id: "104CGP", nombre: "Cristina Garcia Pineda" },
   { id: "113MCM", nombre: "Marisa Cortes Merino" },
@@ -30,11 +31,10 @@ const colaboradoresMaster = [
 ];
 
 // 2. CONFIGURACIÓN DE AUTENTICACIÓN GOOGLE
-// Modificado para que en local use directamente tu archivo key.json
 let serviceAccountAuth;
 
 try {
-  // Intentamos cargar el archivo key.json que se ve en tu carpeta backend
+  // Intentamos usar el archivo key.json si existe en el entorno local
   const keyJsonPath = path.join(__dirname, "key.json");
   const creds = require(keyJsonPath);
 
@@ -45,7 +45,7 @@ try {
   });
   console.log("🔒 Autenticación configurada usando key.json local");
 } catch (e) {
-  // Si no existe key.json (como en producción en Render), usa el .env
+  // Respaldo para cuando esté en producción (Render) usando las variables de entorno
   serviceAccountAuth = new JWT({
     email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     key: process.env.GOOGLE_PRIVATE_KEY
@@ -58,13 +58,13 @@ try {
   );
 }
 
-// 3. CONEXIÓN AL DOCUMENTO
+// 3. CONEXIÓN AL DOCUMENTO GOOGLE SHEET
 const doc = new GoogleSpreadsheet(
   process.env.SPREADSHEET_ID,
   serviceAccountAuth,
 );
 
-// 4. RUTA PARA OBTENER EL RANKING PROCESADO (CON FILTRO MENSUAL)
+// 4. RUTA PARA OBTENER EL RANKING PROCESADO (CON FILTRO MENSUAL SEGURO)
 app.get("/ranking", async (req, res) => {
   try {
     await doc.loadInfo();
@@ -73,25 +73,37 @@ app.get("/ranking", async (req, res) => {
 
     const ventasPorAgente = {};
 
-    // Obtener mes y año actual
+    // Obtener mes y año actual del servidor
     const ahora = new Date();
     const mesActual = ahora.getMonth();
     const anioActual = ahora.getFullYear();
+
+    // Ajustamos el mes de JavaScript (0-11) al mes natural del Excel (1-12)
+    // Ejemplo: Junio en JS es 5, así que sumamos 1 para compararlo con el '6' del Excel
+    const mesActualHumano = mesActual + 1;
 
     rows.forEach((row) => {
       const fechaString = row.get("Marca temporal");
       if (!fechaString) return;
 
-      const fechaRegistro = new Date(fechaString);
+      // --- ESTRATEGIA DE EXTRACCIÓN DETALLADA POR DIAGONALES ---
+      const partesFecha = fechaString.split("/");
+      if (!partesFecha || partesFecha.length < 3) return;
 
-      // --- FILTRO MENSUAL ---
-      if (
-        fechaRegistro.getMonth() !== mesActual ||
-        fechaRegistro.getFullYear() !== anioActual
-      ) {
-        return;
+      // partesFecha[1] contiene siempre el mes (ej: "06" o "6")
+      const mesRegistro = parseInt(partesFecha[1], 10);
+
+      // partesFecha[2] contiene el año seguido de la hora (ej: "2026 13:53:03")
+      // Cortamos los primeros 4 caracteres para extraer limpiamente el año numérico
+      const anioRegistro = parseInt(partesFecha[2].trim().substring(0, 4), 10);
+
+      // --- FILTRO ROBUSTO ---
+      // Comparamos el mes y año extraídos directamente contra el mes actual en curso
+      if (mesRegistro !== mesActualHumano || anioRegistro !== anioActual) {
+        return; // Ignora por completo las filas que no correspondan a este mes
       }
 
+      // Si pasa el filtro mensual, procesamos los datos del agente
       const rawId = row.get("Ingresa tu número de agente");
       if (!rawId) return;
 
@@ -102,14 +114,17 @@ app.get("/ranking", async (req, res) => {
         ventasPorAgente[agenteId] = { boletos: 0, retornos: 0 };
       }
 
+      // Sumamos 1 boleto por cada registro/fila encontrada
       ventasPorAgente[agenteId].boletos += 1;
 
+      // Sumamos 1 retorno si la columna marca explícitamente que "Si" regresó
       if (retornoStatus.toLowerCase() === "si") {
         ventasPorAgente[agenteId].retornos += 1;
       }
     });
 
-    // --- CRUCE CON LA LISTA MAESTRA ---
+    // --- CRUCE CON EL CATÁLOGO MAESTRO (MERGE) ---
+    // Mapeamos sobre los 17 colaboradores para asegurar que todos figuren con datos o en 0
     const rankingFinal = colaboradoresMaster.map((colab) => {
       const statsEnExcel = ventasPorAgente[colab.id.toUpperCase()];
 
@@ -121,8 +136,10 @@ app.get("/ranking", async (req, res) => {
       };
     });
 
+    // --- ORDENAMIENTO DE LAS TARJETAS ---
     rankingFinal.sort((a, b) => b.retornos - a.retornos);
 
+    // Mandamos el array estructurado al Frontend
     res.json(rankingFinal);
   } catch (error) {
     console.error("Error al procesar el ranking de Ana María:", error);
